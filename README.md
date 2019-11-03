@@ -32,6 +32,9 @@ Note that you can catch errors instead of just returning. You could `return -1` 
 
 If you want to support subcommands or otherwise preprocess arguments, you could use `parseArgsList` and provide a slice of strings.
 
+Use `parseArgsOpt` / `parseArgsListOpt` if you want to provide options like a custom allocator.
+
+
 # Features
 
 ## Parse with = or additional arguments
@@ -72,6 +75,18 @@ const MyArgs = struct {
 ```
 Passing more or fewer values is an error, and values are typechecked.
 
+## Slice types
+Slices are allocated for you and consume any number of arguments until an invalid one is found. Allocated using `options.allocator`.
+
+```zig
+const MyArgs = struct {
+    names: [][]const u8,
+    values: []u32,
+};
+// ./a --names Alice Bob Carol --values 1 100
+```
+
+
 # Future...
 
 ## Default values
@@ -111,18 +126,6 @@ const MyArgs = struct {
     foo: i32,
     const foo__DOC = "This string would show in `--help`";
 };
-```
-
-## Support arbitrary length arguments
-(TODO)
-This would parse any number of values for an argument until the next argument is found
-
-```zig
-const MyArgs = struct {
-    names: [][]const u8,
-    foo: bool,
-};
-// ./a --names Alice Bob Carol --foo
 ```
 
 ## Collect extra arguments
@@ -172,9 +175,8 @@ const MyArgs = struct {
 // ./a -f foo.txt
 ```
 
-## Allow user options
-(TODO)
-Add a way to specify some user parameters. 
+## Add more options
+Add some user parameters. 
 - Should `--` be allowed at the start of value names? 
 - Should `-` argument prefixes be treated like `--` (Windows often uses `-`, Linux/macOS `--`)
 - What function should be used for outputing information? (default: `std.debug.warn`)
