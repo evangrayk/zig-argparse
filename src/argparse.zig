@@ -25,20 +25,6 @@ const AliasEntry = struct {
 pub fn Alias(comptime fieldName: []const u8) AliasEntry {
     return AliasEntry{ .fieldName = fieldName };
 }
-
-fn usage(comptime T: type, args: []const []const u8) void {
-    const info = @typeInfo(T).Struct;
-    log("Usage: {}\n", args[0]);
-    inline for (info.fields) |field| {
-        const name = field.name;
-        log("--{}", name);
-        if (field.field_type != ?bool) {
-            log("=({})", @typeName(field.field_type));
-        }
-        log("\n");
-    }
-}
-
 const ArgParseError = error{
     CalledWithoutAnyArguments,
     InvalidArgs,
@@ -50,10 +36,24 @@ const ArgParseError = error{
     NotEnoughArrayArguments,
 };
 
+const ArgParseOptions = struct {
+    allocator: *std.mem.Allocator = std.heap.c_allocator,
+};
+
 /// Parse process's command line arguments subject to the passed struct's format.
 pub fn parseArgs(comptime T: type) !T {
-    const args = try std.process.argsAlloc(std.heap.c_allocator);
-    return parseArgsList(T, args);
+    return parseArgsOpt(T, ArgParseOptions{});
+}
+
+/// Parse process's command line arguments subject to the passed struct's format and parsing options
+pub fn parseArgsOpt(comptime T: type, options: ArgParseOptions) !T {
+    const args = try std.process.argsAlloc(options.allocator);
+    return parseArgsListOpt(T, args, options);
+}
+
+/// Parse arbitrary string arguments subject to the passed struct's format.
+pub fn parseArgsList(comptime T: type, args: []const []const u8) ArgParseError!T {
+    return parseArgsListOpt(T, args, ArgParseOptions{});
 }
 
 fn Context(comptime T: type) type {
@@ -64,8 +64,8 @@ fn Context(comptime T: type) type {
     };
 }
 
-/// Parse arbitrary string arguments subject to the passed struct's format.
-pub fn parseArgsList(comptime T: type, args: []const []const u8) ArgParseError!T {
+/// Parse arbitrary string arguments subject to the passed struct's format and parsing options.
+pub fn parseArgsListOpt(comptime T: type, args: []const []const u8, options: ArgParseOptions) ArgParseError!T {
     if (args.len < 1) {
         log("\nFirst argument should be the program name\n");
         return error.CalledWithoutAnyArguments;
@@ -175,6 +175,19 @@ pub fn parseArgsList(comptime T: type, args: []const []const u8) ArgParseError!T
     }
 
     return ctx.result;
+}
+
+fn usage(comptime T: type, args: []const []const u8) void {
+    const info = @typeInfo(T).Struct;
+    log("Usage: {}\n", args[0]);
+    inline for (info.fields) |field| {
+        const name = field.name;
+        log("--{}", name);
+        if (field.field_type != ?bool) {
+            log("=({})", @typeName(field.field_type));
+        }
+        log("\n");
+    }
 }
 
 fn markArgAsFound(comptime n: usize, requiredArgs: *[n](?[]const u8), name: []const u8) void {
