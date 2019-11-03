@@ -7,6 +7,15 @@
             "label": "run zig",
             "type": "shell",
             "command": "/usr/local/bin/zig build run",
+            "group": "build",
+            "presentation": {
+                "clear": true
+            }
+        },
+        {
+            "label": "test zig",
+            "type": "shell",
+            "command": "/usr/local/bin/zig test ${workspaceRoot}/src/tests.zig",
             "group": {
                 "kind": "build",
                 "isDefault": true

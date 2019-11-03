@@ -1,56 +1,94 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const mem = std.mem;
-const warn = std.debug.warn;
+const logInsideTest = @import("tests.zig").logInsideTest;
+usingnamespace @import("utils.zig");
 
 // getting default values depends on https://github.com/ziglang/zig/issues/2937
 // parsing doc strings depends on https://github.com/ziglang/zig/issues/2573
 
 // TODOs:
 // disallow passing the same arg twice
-// look for '=' so `--arg=val` is the same as `--arg val`
 // add a way to allow `--` at the start of values?
 // support positional arguments
+// support comma-separate array values? --arrayArg=1,2,3 or --arrayArg 1,2,3
+
+const log = if (builtin.is_test) logInsideTest else std.debug.warn;
 
 // Use this in the struct as a value that's specifically ignored by the parser
 // and gets filled with all positional arguments
 pub const PositionalArguments = [][]const u8;
 
-fn markArgAsFound(comptime n: usize, requiredArgs: *[n](?[]const u8), name: []const u8) void {
-    for (requiredArgs) |*reqArg| {
-        if (reqArg.*) |reqArgName| {
-            if (mem.eql(u8, reqArgName, name)) {
-                reqArg.* = null;
-            }
-        }
-    }
+const AliasEntry = struct {
+    fieldName: []const u8,
+};
+pub fn Alias(comptime fieldName: []const u8) AliasEntry {
+    return AliasEntry{ .fieldName = fieldName };
 }
 
-fn usage(comptime T: type, args: [][]const u8) void {
+fn usage(comptime T: type, args: []const []const u8) void {
     const info = @typeInfo(T).Struct;
-    warn("Usage: {}\n", args[0]);
+    log("Usage: {}\n", args[0]);
     inline for (info.fields) |field| {
         const name = field.name;
-        warn("--{}", name);
+        log("--{}", name);
         if (field.field_type != ?bool) {
-            warn("=({})", @typeName(field.field_type));
+            log("=({})", @typeName(field.field_type));
         }
-        warn("\n");
+        log("\n");
     }
 }
 
+const ArgParseError = error{
+    CalledWithoutAnyArguments,
+    InvalidArgs,
+    MissingRequiredArgument,
+    ExpectedArgument,
+    CouldNotParseInteger,
+    CouldNotParseFloat,
+    UnexpectedArgument,
+    NotEnoughArrayArguments,
+};
+
+/// Parse process's command line arguments subject to the passed struct's format.
 pub fn parseArgs(comptime T: type) !T {
     const args = try std.process.argsAlloc(std.heap.c_allocator);
+    return parseArgsList(T, args);
+}
 
-    var arg_i: usize = 0;
+fn Context(comptime T: type) type {
+    return struct {
+        args: []const []const u8,
+        arg_i: usize,
+        result: T,
+    };
+}
 
+/// Parse arbitrary string arguments subject to the passed struct's format.
+pub fn parseArgsList(comptime T: type, args: []const []const u8) ArgParseError!T {
+    if (args.len < 1) {
+        log("\nFirst argument should be the program name\n");
+        return error.CalledWithoutAnyArguments;
+    }
     const info = @typeInfo(T).Struct;
 
+    var ctx = Context(T){
+        .args = args,
+        .arg_i = 1, // skip program name
+        .result = undefined,
+    };
+
     // set all optional fields to null
-    var result: T = undefined;
     inline for (info.fields) |field| {
-        switch (@typeInfo(field.field_type)) {
+        const fieldInfo = @typeInfo(field.field_type);
+        switch (fieldInfo) {
             .Optional => {
-                @field(result, field.name) = null;
+                if (fieldInfo.Optional.child == bool) {
+                    // optional bools are just false
+                    @field(ctx.result, field.name) = false;
+                } else {
+                    @field(ctx.result, field.name) = null;
+                }
                 break;
             },
             else => continue,
@@ -68,76 +106,118 @@ pub fn parseArgs(comptime T: type) !T {
         }
     }
 
-    while (arg_i < args.len) : (arg_i += 1) {
-        const arg = args[arg_i];
+    while (ctx.arg_i < args.len) : (ctx.arg_i += 1) {
+        const arg = args[ctx.arg_i];
         if (mem.eql(u8, arg, "--help")) {
             usage(T, args);
             return error.InvalidArgs;
         }
 
         if (startsWith(arg, "--")) {
-            const argName = arg[2..];
             inline for (info.fields) |field| {
                 const name = field.name;
+                var argName = arg[2..];
+                var next: ?[]const u8 = null;
+                if (splitAtFirst(argName, '=')) |parts| {
+                    argName = parts[0];
+                    next = parts[1];
+                }
                 if (mem.eql(u8, argName, name)) {
-                    if (field.field_type == ?bool) {
-                        @field(result, name) = true;
+                    if (field.field_type == bool or field.field_type == ?bool) {
+                        @field(ctx.result, name) = true;
+                    } else if (isArray(field.field_type)) |arrType| {
+                        // TODO: split next arg on ','?
+                        const len = arrType.len;
+
+                        if (ctx.arg_i + len >= ctx.args.len) {
+                            usage(T, ctx.args);
+                            log("\nMust provide {} values for array argument '{}'\n", usize(len), name);
+                            return error.NotEnoughArrayArguments;
+                        }
+
+                        var array_i: usize = 0;
+                        while (array_i < len) : (array_i += 1) {
+                            ctx.arg_i += 1;
+                            const value = ctx.args[ctx.arg_i];
+                            @field(ctx.result, field.name)[array_i] = try parseValueForField(T, &ctx, field.name, arrType.child, value);
+                        }
                     } else {
-                        arg_i += 1;
-                        if (arg_i >= args.len) {
-                            usage(T, args);
-                            warn("\nExpected value after {}\n", name);
-                            return error.ExpectedArgument;
-                        }
-                        const value = args[arg_i];
-                        if (startsWith(value, "--")) {
-                            usage(T, args);
-                            warn("\nExpected value after {}, found argument '{}'\n", name, value);
-                            return error.ExpectedArgument;
-                        }
-                        switch (field.field_type) {
-                            u8, u16, u32, u64, i8, i16, i32, i64, usize => {
-                                @field(result, name) = std.fmt.parseInt(field.field_type, value, 10) catch |e| {
-                                    usage(T, args);
-                                    warn("\nExpected {} for '{}', found '{}'\n", @typeName(field.field_type), name, value);
-                                    return e;
-                                };
-                                markArgAsFound(requiredArgs.len, &requiredArgs, name);
-                                break;
-                            },
-                            f32, f64 => {
-                                @field(result, name) = std.fmt.parseFloat(field.field_type, value) catch |e| {
-                                    usage(T, args);
-                                    warn("\nExpected {} for '{}', found '{}'\n", @typeName(field.field_type), name, value);
-                                    return e;
-                                };
-                                markArgAsFound(requiredArgs.len, &requiredArgs, name);
-                                break;
-                            },
-                            []const u8 => {
-                                @field(result, name) = value;
-                                markArgAsFound(requiredArgs.len, &requiredArgs, name);
-                                break;
-                            },
-                            else => unreachable,
-                        }
+                        var value = if (next) |nonNullNext| nonNullNext else blk: {
+                            ctx.arg_i += 1;
+                            if (ctx.arg_i >= ctx.args.len) {
+                                usage(T, ctx.args);
+                                return error.ExpectedArgument;
+                            }
+                            break :blk ctx.args[ctx.arg_i];
+                        };
+
+                        @field(ctx.result, field.name) = try parseValueForField(T, &ctx, field.name, field.field_type, value);
                     }
+
+                    markArgAsFound(requiredArgs.len, &requiredArgs, name);
+                    break;
                 }
             }
+        } else {
+            // TODO: Support positional args
+            usage(T, args);
+            log("\nUnexpected argument '{}'\n", arg);
+            return error.UnexpectedArgument;
         }
     }
 
     for (requiredArgs) |req_arg| {
         if (req_arg) |rarg| {
             usage(T, args);
-            warn("\nMissing required argument '{}'\n", rarg);
+            log("\nMissing required argument '{}'\n", rarg);
             return error.MissingRequiredArgument;
         }
     }
 
-    return result;
+    return ctx.result;
 }
 
-fn startsWith(s: []const u8, prefix: []const u8) bool {
-    return s.len >= prefix.len and (mem.eql(u8, s[0..prefix.len], prefix));
+fn markArgAsFound(comptime n: usize, requiredArgs: *[n](?[]const u8), name: []const u8) void {
+    for (requiredArgs) |*reqArg| {
+        if (reqArg.*) |reqArgName| {
+            if (mem.eql(u8, reqArgName, name)) {
+                reqArg.* = null;
+            }
+        }
+    }
+}
+
+fn parseValueForField(
+    comptime T: type,
+    ctx: *Context(T),
+    comptime name: []const u8,
+    comptime FieldType: type,
+    value: []const u8,
+) ArgParseError!NonOptional(FieldType) {
+    comptime const FT = NonOptional(FieldType);
+    if (startsWith(value, "--")) {
+        usage(T, ctx.args);
+        log("\nExpected value for argument '{}', found argument '{}'\n", name, value);
+        return error.ExpectedArgument;
+    }
+    switch (FT) {
+        u8, u16, u32, u64, i8, i16, i32, i64, usize => {
+            return std.fmt.parseInt(FT, value, 10) catch |e| {
+                usage(T, ctx.args);
+                log("\nExpected {} for '{}', found '{}'\n", @typeName(FT), name, value);
+                return error.CouldNotParseInteger;
+            };
+        },
+        f32, f64 => {
+            return std.fmt.parseFloat(FT, value) catch |e| {
+                usage(T, ctx.args);
+                log("\nExpected {} for '{}', found '{}'\n", @typeName(FT), name, value);
+                return error.CouldNotParseFloat;
+            };
+        },
+        []const u8 => {
+            return value;
+        },
+        else => unreachable,
+    }
 }
