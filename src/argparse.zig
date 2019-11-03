@@ -152,25 +152,24 @@ pub fn parseArgsListOpt(comptime T: type, args: []const []const u8, options: Arg
                             if (builtin.TypeInfo.Pointer.Size(pointerType.size) == .One) {
                                 @compileError("Pointers are not supported as argument types.");
                             }
-                            handlePtrBlk: {
-                                if (pointerType.is_const) {
-                                    if (pointerType.child == u8) {
-                                        var value = if (next) |nonNullNext| nonNullNext else blk: {
-                                            ctx.arg_i += 1;
-                                            if (ctx.arg_i >= ctx.args.len) {
-                                                usage(T, ctx.args);
-                                                return error.ExpectedArgument;
-                                            }
-                                            break :blk ctx.args[ctx.arg_i];
-                                        };
+                            var gotString = false;
+                            if (pointerType.is_const) {
+                                if (pointerType.child == u8) {
+                                    var value = if (next) |nonNullNext| nonNullNext else blk: {
+                                        ctx.arg_i += 1;
+                                        if (ctx.arg_i >= ctx.args.len) {
+                                            usage(T, ctx.args);
+                                            return error.ExpectedArgument;
+                                        }
+                                        break :blk ctx.args[ctx.arg_i];
+                                    };
 
-                                        @field(ctx.result, field.name) = try parseValueForField(T, &ctx, field.name, field.field_type, value);
-                                        break :handlePtrBlk;
-                                    } else {
-                                        @compileError("non-string slices must not be const: " ++ @typeName(T) ++ "." ++ field.name ++ " is " ++ @typeName(field.field_type));
-                                    }
+                                    @field(ctx.result, field.name) = try parseValueForField(T, &ctx, field.name, field.field_type, value);
+                                    gotString = true;
+                                } else {
+                                    @compileError("non-string slices must not be const: " ++ @typeName(T) ++ "." ++ field.name ++ " is " ++ @typeName(field.field_type));
                                 }
-
+                            } else {
                                 // count number of valid next args
                                 var countingCtx: Context(T) = ctx; // copy context to count in
                                 countingCtx.silent = true;
@@ -188,11 +187,16 @@ pub fn parseArgsListOpt(comptime T: type, args: []const []const u8, options: Arg
 
                                 @field(ctx.result, field.name) = try options.allocator.alloc(pointerType.child, sliceCount);
 
+                                var slice = comptime if (isOptional(field.field_type))
+                                    @field(ctx.result, field.name).?
+                                else
+                                    @field(ctx.result, field.name);
+
                                 var array_i: usize = 0;
                                 while (array_i < sliceCount) : (array_i += 1) {
                                     ctx.arg_i += 1;
                                     const value = ctx.args[ctx.arg_i];
-                                    @field(ctx.result, field.name)[array_i] = try parseValueForField(T, &ctx, field.name, pointerType.child, value);
+                                    slice[array_i] = try parseValueForField(T, &ctx, field.name, pointerType.child, value);
                                 }
                             }
                         },

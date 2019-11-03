@@ -63,3 +63,11 @@ pub fn NonOptional(comptime T: type) type {
         else => T,
     };
 }
+
+pub fn isOptional(comptime T: type) bool {
+    comptime var info = @typeInfo(T);
+    return switch (info) {
+        .Optional => true,
+        else => false,
+    };
+}

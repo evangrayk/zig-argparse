@@ -193,3 +193,21 @@ test "argparse.slice.typeSafe" {
         foo: u32,
     }, [_][]const u8{ "./a", "--dim", "2", "1000", "--foo", "4" }));
 }
+
+test "argparse.slice.optional" {
+    const result = try parseArgsList(struct {
+        dim: ?[]u32,
+    }, [_][]const u8{ "./a", "--dim", "2", "3" });
+    expectEqual(result.dim.?[0], 2);
+    expectEqual(result.dim.?[1], 3);
+    expectEqual(result.dim.?.len, 2);
+}
+
+test "argparse.slice.strings" {
+    const result = try parseArgsList(struct {
+        words: [][]const u8,
+    }, [_][]const u8{ "./a", "--words", "yo", "there" });
+    expectEqualSlices(u8, result.words[0], "yo");
+    expectEqualSlices(u8, result.words[1], "there");
+    expectEqual(result.words.len, 2);
+}

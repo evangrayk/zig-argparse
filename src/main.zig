@@ -19,6 +19,8 @@ const MyArgs = struct {
     name: []const u8 = "evan",
 
     values: []u32, // --values 1 2 3
+
+    dim: [2]u32,
 };
 
 pub fn main() anyerror!void {
