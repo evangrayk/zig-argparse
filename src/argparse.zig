@@ -34,6 +34,7 @@ const ArgParseError = error{
     CouldNotParseFloat,
     UnexpectedArgument,
     NotEnoughArrayArguments,
+    OutOfMemory,
 };
 
 const ArgParseOptions = struct {
@@ -61,6 +62,7 @@ fn Context(comptime T: type) type {
         args: []const []const u8,
         arg_i: usize,
         result: T,
+        silent: bool = false,
     };
 }
 
@@ -123,35 +125,89 @@ pub fn parseArgsListOpt(comptime T: type, args: []const []const u8, options: Arg
                     next = parts[1];
                 }
                 if (mem.eql(u8, argName, name)) {
-                    if (field.field_type == bool or field.field_type == ?bool) {
-                        @field(ctx.result, name) = true;
-                    } else if (isArray(field.field_type)) |arrType| {
-                        // TODO: split next arg on ','?
-                        const len = arrType.len;
+                    const typeInfo = @typeInfo(NonOptional(field.field_type));
+                    switch (typeInfo) {
+                        .Bool => {
+                            @field(ctx.result, name) = true;
+                        },
+                        .Array => |arrType| {
+                            // TODO: split next arg on ','?
+                            const len = arrType.len;
 
-                        if (ctx.arg_i + len >= ctx.args.len) {
-                            usage(T, ctx.args);
-                            log("\nMust provide {} values for array argument '{}'\n", usize(len), name);
-                            return error.NotEnoughArrayArguments;
-                        }
-
-                        var array_i: usize = 0;
-                        while (array_i < len) : (array_i += 1) {
-                            ctx.arg_i += 1;
-                            const value = ctx.args[ctx.arg_i];
-                            @field(ctx.result, field.name)[array_i] = try parseValueForField(T, &ctx, field.name, arrType.child, value);
-                        }
-                    } else {
-                        var value = if (next) |nonNullNext| nonNullNext else blk: {
-                            ctx.arg_i += 1;
-                            if (ctx.arg_i >= ctx.args.len) {
+                            if (ctx.arg_i + len >= ctx.args.len) {
                                 usage(T, ctx.args);
-                                return error.ExpectedArgument;
+                                log("\nMust provide {} values for array argument '{}'\n", usize(len), name);
+                                return error.NotEnoughArrayArguments;
                             }
-                            break :blk ctx.args[ctx.arg_i];
-                        };
 
-                        @field(ctx.result, field.name) = try parseValueForField(T, &ctx, field.name, field.field_type, value);
+                            var array_i: usize = 0;
+                            while (array_i < len) : (array_i += 1) {
+                                ctx.arg_i += 1;
+                                const value = ctx.args[ctx.arg_i];
+                                @field(ctx.result, field.name)[array_i] = try parseValueForField(T, &ctx, field.name, arrType.child, value);
+                            }
+                        },
+                        .Pointer => |pointerType| {
+                            // TODO: split next arg on ','?
+                            if (builtin.TypeInfo.Pointer.Size(pointerType.size) == .One) {
+                                @compileError("Pointers are not supported as argument types.");
+                            }
+                            handlePtrBlk: {
+                                if (pointerType.is_const) {
+                                    if (pointerType.child == u8) {
+                                        var value = if (next) |nonNullNext| nonNullNext else blk: {
+                                            ctx.arg_i += 1;
+                                            if (ctx.arg_i >= ctx.args.len) {
+                                                usage(T, ctx.args);
+                                                return error.ExpectedArgument;
+                                            }
+                                            break :blk ctx.args[ctx.arg_i];
+                                        };
+
+                                        @field(ctx.result, field.name) = try parseValueForField(T, &ctx, field.name, field.field_type, value);
+                                        break :handlePtrBlk;
+                                    } else {
+                                        @compileError("non-string slices must not be const: " ++ @typeName(T) ++ "." ++ field.name ++ " is " ++ @typeName(field.field_type));
+                                    }
+                                }
+
+                                // count number of valid next args
+                                var countingCtx: Context(T) = ctx; // copy context to count in
+                                countingCtx.silent = true;
+                                const starting_arg_i = ctx.arg_i + 1;
+                                var sliceCount: usize = 0;
+                                while (true) : (sliceCount += 1) {
+                                    if (starting_arg_i + sliceCount >= ctx.args.len) {
+                                        break;
+                                    }
+                                    const value = ctx.args[starting_arg_i + sliceCount];
+                                    _ = parseValueForField(T, &countingCtx, field.name, pointerType.child, value) catch {
+                                        break;
+                                    };
+                                }
+
+                                @field(ctx.result, field.name) = try options.allocator.alloc(pointerType.child, sliceCount);
+
+                                var array_i: usize = 0;
+                                while (array_i < sliceCount) : (array_i += 1) {
+                                    ctx.arg_i += 1;
+                                    const value = ctx.args[ctx.arg_i];
+                                    @field(ctx.result, field.name)[array_i] = try parseValueForField(T, &ctx, field.name, pointerType.child, value);
+                                }
+                            }
+                        },
+                        else => {
+                            var value = if (next) |nonNullNext| nonNullNext else blk: {
+                                ctx.arg_i += 1;
+                                if (ctx.arg_i >= ctx.args.len) {
+                                    usage(T, ctx.args);
+                                    return error.ExpectedArgument;
+                                }
+                                break :blk ctx.args[ctx.arg_i];
+                            };
+
+                            @field(ctx.result, field.name) = try parseValueForField(T, &ctx, field.name, field.field_type, value);
+                        },
                     }
 
                     markArgAsFound(requiredArgs.len, &requiredArgs, name);
@@ -209,22 +265,28 @@ fn parseValueForField(
 ) ArgParseError!NonOptional(FieldType) {
     comptime const FT = NonOptional(FieldType);
     if (startsWith(value, "--")) {
-        usage(T, ctx.args);
-        log("\nExpected value for argument '{}', found argument '{}'\n", name, value);
+        if (!ctx.silent) {
+            usage(T, ctx.args);
+            log("\nExpected value for argument '{}', found argument '{}'\n", name, value);
+        }
         return error.ExpectedArgument;
     }
     switch (FT) {
         u8, u16, u32, u64, i8, i16, i32, i64, usize => {
             return std.fmt.parseInt(FT, value, 10) catch |e| {
-                usage(T, ctx.args);
-                log("\nExpected {} for '{}', found '{}'\n", @typeName(FT), name, value);
+                if (!ctx.silent) {
+                    usage(T, ctx.args);
+                    log("\nExpected {} for '{}', found '{}'\n", @typeName(FT), name, value);
+                }
                 return error.CouldNotParseInteger;
             };
         },
         f32, f64 => {
             return std.fmt.parseFloat(FT, value) catch |e| {
-                usage(T, ctx.args);
-                log("\nExpected {} for '{}', found '{}'\n", @typeName(FT), name, value);
+                if (!ctx.silent) {
+                    usage(T, ctx.args);
+                    log("\nExpected {} for '{}', found '{}'\n", @typeName(FT), name, value);
+                }
                 return error.CouldNotParseFloat;
             };
         },

@@ -29,4 +29,8 @@ pub fn main() anyerror!void {
 
     std.debug.warn("\n-------------\n");
     std.debug.warn("{}\n", parsed);
+    for (parsed.values) |value| {
+        std.debug.warn("{} ", value);
+    }
+    std.debug.warn("\n");
 }
